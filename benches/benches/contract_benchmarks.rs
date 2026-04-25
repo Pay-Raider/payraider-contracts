@@ -1,7 +1,8 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use soroban_sdk::{testutils::Address as _, Address, BytesN, Env};
+use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, String};
 
 use analytics::{AnalyticsContract, AnalyticsContractClient};
+use governance::{GovernanceContract, GovernanceContractClient, VoteChoice};
 use stellar_insights::{StellarInsightsContract, StellarInsightsContractClient};
 
 // ============================================================================
@@ -225,4 +226,165 @@ criterion_group!(
     bench_stellar_insights_latest,
 );
 
-criterion_main!(analytics_benches, stellar_insights_benches);
+// ============================================================================
+// Governance helpers
+// ============================================================================
+
+fn setup_governance(env: &Env) -> (GovernanceContractClient, Address) {
+    let contract_id = env.register_contract(None, GovernanceContract);
+    let client = GovernanceContractClient::new(env, &contract_id);
+    let admin = Address::generate(env);
+    env.mock_all_auths();
+    // quorum=1, voting_period=3600 (1 hour)
+    client.initialize(&admin, &1u64, &3600u64).unwrap();
+    (client, admin)
+}
+
+fn make_title(env: &Env, n: u64) -> String {
+    // Soroban String::from_str requires a &str literal; use a fixed title and
+    // vary the wasm hash seed instead to keep epochs distinct.
+    let _ = n;
+    String::from_str(env, "Benchmark Proposal")
+}
+
+// ============================================================================
+// bench_governance_create_proposal
+// Measures cost of creating a new governance proposal.
+// ============================================================================
+
+fn bench_governance_create_proposal(c: &mut Criterion) {
+    let env = Env::default();
+    let (client, admin) = setup_governance(&env);
+    let target = Address::generate(&env);
+    let mut seed = 1u8;
+
+    c.bench_function("governance::create_proposal", |b| {
+        b.iter(|| {
+            let hash = BytesN::from_array(&env, &[seed; 32]);
+            let title = make_title(&env, seed as u64);
+            client
+                .create_proposal(
+                    black_box(&admin),
+                    black_box(&title),
+                    black_box(&target),
+                    black_box(&hash),
+                )
+                .unwrap();
+            seed = seed.wrapping_add(1);
+        })
+    });
+}
+
+// ============================================================================
+// bench_governance_vote
+// Measures cost of casting a vote on an active proposal.
+// A fresh env + proposal is created per iteration so the voter is always new.
+// ============================================================================
+
+fn bench_governance_vote(c: &mut Criterion) {
+    c.bench_function("governance::vote", |b| {
+        b.iter(|| {
+            let env = Env::default();
+            let (client, admin) = setup_governance(&env);
+            let target = Address::generate(&env);
+            let hash = BytesN::from_array(&env, &[1u8; 32]);
+            let title = make_title(&env, 1);
+            let proposal_id = client
+                .create_proposal(&admin, &title, &target, &hash)
+                .unwrap();
+
+            let voter = Address::generate(&env);
+            client
+                .vote(black_box(&voter), black_box(&proposal_id), black_box(&VoteChoice::For))
+                .unwrap();
+        })
+    });
+}
+
+// ============================================================================
+// bench_governance_multi_vote
+// Measures tally update cost as voter count grows.
+// Parameterised over voter counts: 5, 10, 25, 50.
+// ============================================================================
+
+fn bench_governance_multi_vote(c: &mut Criterion) {
+    let mut group = c.benchmark_group("governance::multi_vote");
+
+    for voter_count in [5u32, 10, 25, 50] {
+        group.bench_with_input(
+            BenchmarkId::from_parameter(voter_count),
+            &voter_count,
+            |b, &n| {
+                b.iter(|| {
+                    let env = Env::default();
+                    let (client, admin) = setup_governance(&env);
+                    let target = Address::generate(&env);
+                    let hash = BytesN::from_array(&env, &[1u8; 32]);
+                    let title = make_title(&env, 1);
+                    let proposal_id = client
+                        .create_proposal(&admin, &title, &target, &hash)
+                        .unwrap();
+
+                    for _ in 0..n {
+                        let voter = Address::generate(&env);
+                        client
+                            .vote(black_box(&voter), black_box(&proposal_id), black_box(&VoteChoice::For))
+                            .unwrap();
+                    }
+                })
+            },
+        );
+    }
+
+    group.finish();
+}
+
+// ============================================================================
+// bench_governance_get_proposal
+// Measures read cost of fetching a proposal by id.
+// ============================================================================
+
+fn bench_governance_get_proposal(c: &mut Criterion) {
+    let env = Env::default();
+    let (client, admin) = setup_governance(&env);
+    let target = Address::generate(&env);
+    let hash = BytesN::from_array(&env, &[1u8; 32]);
+    let title = make_title(&env, 1);
+    let proposal_id = client
+        .create_proposal(&admin, &title, &target, &hash)
+        .unwrap();
+
+    c.bench_function("governance::get_proposal", |b| {
+        b.iter(|| client.get_proposal(black_box(&proposal_id)))
+    });
+}
+
+// ============================================================================
+// Registration
+// ============================================================================
+
+criterion_group!(
+    analytics_benches,
+    bench_submit_snapshot,
+    bench_get_snapshot,
+    bench_get_latest_snapshot,
+    bench_batch_operations,
+    bench_snapshot_history_growth,
+);
+
+criterion_group!(
+    stellar_insights_benches,
+    bench_stellar_insights_submit,
+    bench_stellar_insights_get,
+    bench_stellar_insights_latest,
+);
+
+criterion_group!(
+    governance_benches,
+    bench_governance_create_proposal,
+    bench_governance_vote,
+    bench_governance_multi_vote,
+    bench_governance_get_proposal,
+);
+
+criterion_main!(analytics_benches, stellar_insights_benches, governance_benches);
