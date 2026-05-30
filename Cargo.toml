@@ -6,6 +6,8 @@ members = [
   "benches",
   "access-control",
   "governance",
+  "escrow",
+  "governance-voting",
 ]
 
 # Clippy linting configuration for all contracts
