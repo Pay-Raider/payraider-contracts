@@ -8,6 +8,9 @@ members = [
   "governance",
   "escrow",
   "governance-voting",
+  "multi-sig-wallet",
+  "time-locked-transactions",
+  "token-swap",
 ]
 
 # Clippy linting configuration for all contracts
