@@ -8,7 +8,7 @@ use events::{
     emit_admin_changed, emit_initialized, emit_proposal_created, emit_proposal_finalized,
     emit_vote_cast, emit_voter_registered,
 };
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, String};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Map, String, Vec};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -83,6 +83,10 @@ pub enum DataKey {
     VoterWeight(Address),
     /// Whether a voter has voted on a specific proposal
     VoteCast(u64, Address),
+    /// Ordered list of all registered voter addresses (for snapshot enumeration)
+    VoterList,
+    /// Snapshot of every voter's weight captured at proposal creation: Map<Address, u64>
+    ProposalWeightSnapshot(u64),
 }
 
 // ============================================================================
@@ -171,6 +175,18 @@ impl GovernanceVotingContract {
             DATA_TTL_THRESHOLD,
             DATA_TTL_EXTEND,
         );
+
+        // Maintain the global voter list so create_proposal can snapshot all weights.
+        let mut voter_list: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::VoterList)
+            .unwrap_or_else(|| Vec::new(&env));
+        if !voter_list.contains(&voter) {
+            voter_list.push_back(voter.clone());
+            env.storage().instance().set(&DataKey::VoterList, &voter_list);
+        }
+
         bump_instance(&env);
 
         emit_voter_registered(&env, voter, weight);
@@ -193,7 +209,23 @@ impl GovernanceVotingContract {
 
         env.storage()
             .persistent()
-            .remove(&DataKey::VoterWeight(voter));
+            .remove(&DataKey::VoterWeight(voter.clone()));
+
+        // Remove the voter from the global list.
+        let voter_list: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::VoterList)
+            .unwrap_or_else(|| Vec::new(&env));
+        let mut new_list: Vec<Address> = Vec::new(&env);
+        for i in 0..voter_list.len() {
+            let addr = voter_list.get(i).unwrap();
+            if addr != voter {
+                new_list.push_back(addr);
+            }
+        }
+        env.storage().instance().set(&DataKey::VoterList, &new_list);
+
         bump_instance(&env);
         Ok(())
     }
@@ -282,6 +314,34 @@ impl GovernanceVotingContract {
             DATA_TTL_EXTEND,
         );
 
+        // Snapshot every registered voter's weight at proposal creation time.
+        // Voting uses this snapshot so tokens transferred after proposal creation
+        // cannot inflate vote weight (prevents double-vote via token transfer).
+        let voter_list: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::VoterList)
+            .unwrap_or_else(|| Vec::new(&env));
+        let mut weight_snapshot: Map<Address, u64> = Map::new(&env);
+        for i in 0..voter_list.len() {
+            let addr = voter_list.get(i).unwrap();
+            if let Some(w) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, u64>(&DataKey::VoterWeight(addr.clone()))
+            {
+                weight_snapshot.set(addr, w);
+            }
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::ProposalWeightSnapshot(count), &weight_snapshot);
+        env.storage().persistent().extend_ttl(
+            &DataKey::ProposalWeightSnapshot(count),
+            DATA_TTL_THRESHOLD,
+            DATA_TTL_EXTEND,
+        );
+
         env.storage()
             .instance()
             .set(&DataKey::ProposalCount, &count);
@@ -304,10 +364,15 @@ impl GovernanceVotingContract {
     ) -> Result<(), Error> {
         voter.require_auth();
 
-        let weight: u64 = env
+        // Use the weight snapshot taken at proposal creation to prevent double-voting
+        // via token transfer: the voter's weight is locked in at proposal creation time.
+        let weight_snapshot: Map<Address, u64> = env
             .storage()
             .persistent()
-            .get(&DataKey::VoterWeight(voter.clone()))
+            .get(&DataKey::ProposalWeightSnapshot(proposal_id))
+            .ok_or(Error::ProposalNotFound)?;
+        let weight: u64 = weight_snapshot
+            .get(voter.clone())
             .ok_or(Error::VoterNotRegistered)?;
 
         let mut proposal: Proposal = env
