@@ -32,4 +32,6 @@ pub enum Error {
     TxIdOverflow = 13,
     /// Duplicate address in owners list
     DuplicateOwner = 14,
+    /// Reentrant call detected
+    Reentrancy = 15,
 }

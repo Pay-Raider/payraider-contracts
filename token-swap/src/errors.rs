@@ -26,4 +26,6 @@ pub enum Error {
     SameToken = 10,
     /// Contract is paused
     ContractPaused = 11,
+    /// Reentrant call detected
+    Reentrancy = 12,
 }
