@@ -183,6 +183,11 @@ impl StellarInsightsContract {
             return Err(Error::InvalidEpochZero);
         }
 
+        // Prevent u64 overflow on mainnet by capping at u64::MAX
+        if epoch == u64::MAX {
+            return Err(Error::EpochOverflow);
+        }
+
         // Get existing snapshots map or create new one
         let mut snapshots: Map<u64, Snapshot> = env
             .storage()

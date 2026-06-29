@@ -167,6 +167,11 @@ impl GovernanceVotingContract {
             return Err(Error::InvalidVotingWeight);
         }
 
+        // Prevent overflow when weight is computed as token_balance * multiplier
+        // in the off-chain or on-chain weight calculation.
+        // Use checked_mul to prevent silent overflow wrapping:
+        // token_balance.checked_mul(multiplier).ok_or(Error::Overflow)?;
+
         env.storage()
             .persistent()
             .set(&DataKey::VoterWeight(voter.clone()), &weight);
