@@ -21,4 +21,5 @@ soroban-sdk = { workspace = true, features = ["testutils"] }
 analytics = { path = "../analytics" }
 governance = { path = "../governance" }
 escrow = { path = "../escrow" }
+multi-sig-wallet = { path = "../multi-sig-wallet" }
 stellar-insights = { path = "../stellar_insights" }
