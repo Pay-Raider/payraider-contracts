@@ -6,9 +6,10 @@
 
 #![cfg(feature = "testnet-integration")]
 
+mod access_control_test;
+mod escrow_test;
 mod governance_test;
 mod stellar_insights_test;
-mod escrow_test;
 
 use std::env;
 
