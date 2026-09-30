@@ -15,9 +15,7 @@
 
 #![cfg_attr(target_arch = "wasm32", no_std)]
 
-use soroban_sdk::{
-    contracttype, symbol_short, vec, Address, Env, Symbol, Vec,
-};
+use soroban_sdk::{contracterror, contracttype, symbol_short, vec, Address, Env, Symbol, Vec};
 
 /// Current contract version storage key.
 const VERSION_KEY: Symbol = symbol_short!("VERSION");
@@ -66,6 +64,31 @@ pub struct UpgradeProposal {
     pub migration_data: Vec<u8>,
 }
 
+/// Errors returned by the upgrade helpers instead of panicking.
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum UpgradeError {
+    /// The admin/governance address has not been set yet.
+    NotInitialized = 1,
+    /// There is no upgrade proposal to act on.
+    NoUpgradeProposal = 2,
+    /// A stored value could not be decoded.
+    StorageCorrupted = 3,
+}
+
+/// Reads a stored value: a missing key is `None`, a decode failure is an error.
+fn read_optional<T>(env: &Env, key: &Symbol) -> Result<Option<T>, UpgradeError>
+where
+    T: soroban_sdk::TryFromVal<Env, soroban_sdk::Val>,
+{
+    match env.storage().get(key) {
+        None => Ok(None),
+        Some(Ok(value)) => Ok(Some(value)),
+        Some(Err(_)) => Err(UpgradeError::StorageCorrupted),
+    }
+}
+
 /// Initialize the upgradeable contract with an admin/governance address.
 pub fn init_upgradeable(env: &Env, admin: Address) {
     env.storage().set(&ADMIN_KEY, &admin);
@@ -73,16 +96,13 @@ pub fn init_upgradeable(env: &Env, admin: Address) {
 }
 
 /// Get the current contract version.
-pub fn get_version(env: &Env) -> u32 {
-    env.storage().get(&VERSION_KEY).unwrap_or(Ok(1u32)).unwrap()
+pub fn get_version(env: &Env) -> Result<u32, UpgradeError> {
+    Ok(read_optional(env, &VERSION_KEY)?.unwrap_or(1u32))
 }
 
 /// Get the current admin/governance address.
-pub fn get_admin(env: &Env) -> Address {
-    env.storage()
-        .get(&ADMIN_KEY)
-        .expect("admin not set")
-        .unwrap()
+pub fn get_admin(env: &Env) -> Result<Address, UpgradeError> {
+    read_optional(env, &ADMIN_KEY)?.ok_or(UpgradeError::NotInitialized)
 }
 
 /// Propose a contract upgrade. Only the admin/governance can call this.
@@ -93,18 +113,14 @@ pub fn propose_upgrade(
     new_wasm_hash: Bytes,
     new_version: u32,
     migration_data: Vec<u8>,
-) -> UpgradeProposal {
+) -> Result<UpgradeProposal, UpgradeError> {
     caller.require_auth();
 
-    let admin = get_admin(env);
-    assert_eq!(
-        caller, admin,
-        "only admin/governance can propose upgrades"
-    );
+    let admin = get_admin(env)?;
+    assert_eq!(caller, admin, "only admin/governance can propose upgrades");
 
     // Check no existing pending proposal
-    if let Some(existing) = env.storage().get(&PROPOSAL_KEY) {
-        let proposal: UpgradeProposal = existing.unwrap();
+    if let Some(proposal) = read_optional::<UpgradeProposal>(env, &PROPOSAL_KEY)? {
         assert!(
             proposal.status != UpgradeStatus::Pending,
             "an upgrade proposal is already pending"
@@ -130,7 +146,7 @@ pub fn propose_upgrade(
         (new_version, now),
     );
 
-    proposal
+    Ok(proposal)
 }
 
 /// Propose an emergency upgrade with a shorter timelock (2 hours).
@@ -141,10 +157,10 @@ pub fn propose_emergency_upgrade(
     new_wasm_hash: Bytes,
     new_version: u32,
     migration_data: Vec<u8>,
-) -> UpgradeProposal {
+) -> Result<UpgradeProposal, UpgradeError> {
     caller.require_auth();
 
-    let admin = get_admin(env);
+    let admin = get_admin(env)?;
     assert_eq!(
         caller, admin,
         "only admin/governance can propose emergency upgrades"
@@ -168,22 +184,19 @@ pub fn propose_emergency_upgrade(
         (new_version, now),
     );
 
-    proposal
+    Ok(proposal)
 }
 
 /// Execute a pending upgrade after the timelock has expired.
 /// Only the admin/governance can call this.
-pub fn execute_upgrade(env: &Env, caller: Address) {
+pub fn execute_upgrade(env: &Env, caller: Address) -> Result<(), UpgradeError> {
     caller.require_auth();
 
-    let admin = get_admin(env);
+    let admin = get_admin(env)?;
     assert_eq!(caller, admin, "only admin can execute upgrades");
 
-    let proposal: UpgradeProposal = env
-        .storage()
-        .get(&PROPOSAL_KEY)
-        .expect("no pending upgrade")
-        .unwrap();
+    let proposal: UpgradeProposal =
+        read_optional(env, &PROPOSAL_KEY)?.ok_or(UpgradeError::NoUpgradeProposal)?;
 
     assert_eq!(
         proposal.status,
@@ -214,17 +227,17 @@ pub fn execute_upgrade(env: &Env, caller: Address) {
     // Note: The actual WASM deployment is handled by the deployer mechanism
     // in Soroban. This function handles the governance logic and versioning.
     // The new_wasm_hash is used by the deployer to verify the upgrade.
+    Ok(())
 }
 
 /// Cancel a pending upgrade. Only the admin/governance can call this.
-pub fn cancel_upgrade(env: &Env, caller: Address) {
+pub fn cancel_upgrade(env: &Env, caller: Address) -> Result<(), UpgradeError> {
     caller.require_auth();
 
-    let admin = get_admin(env);
+    let admin = get_admin(env)?;
     assert_eq!(caller, admin, "only admin can cancel upgrades");
 
-    if let Some(existing) = env.storage().get(&PROPOSAL_KEY) {
-        let mut proposal: UpgradeProposal = existing.unwrap();
+    if let Some(mut proposal) = read_optional::<UpgradeProposal>(env, &PROPOSAL_KEY)? {
         assert_eq!(
             proposal.status,
             UpgradeStatus::Pending,
@@ -238,29 +251,30 @@ pub fn cancel_upgrade(env: &Env, caller: Address) {
             env.ledger().timestamp(),
         );
     }
+    Ok(())
 }
 
 /// Get the current upgrade proposal (if any).
-pub fn get_upgrade_proposal(env: &Env) -> Option<UpgradeProposal> {
-    env.storage().get(&PROPOSAL_KEY).map(|v| v.unwrap())
+pub fn get_upgrade_proposal(env: &Env) -> Result<Option<UpgradeProposal>, UpgradeError> {
+    read_optional(env, &PROPOSAL_KEY)
 }
 
 /// Check if an upgrade is ready to execute (timelock expired).
-pub fn is_upgrade_ready(env: &Env) -> bool {
-    if let Some(proposal) = get_upgrade_proposal(env) {
+pub fn is_upgrade_ready(env: &Env) -> Result<bool, UpgradeError> {
+    if let Some(proposal) = get_upgrade_proposal(env)? {
         if proposal.status != UpgradeStatus::Pending {
-            return false;
+            return Ok(false);
         }
-        return env.ledger().timestamp() >= proposal.timelock_expires_at;
+        return Ok(env.ledger().timestamp() >= proposal.timelock_expires_at);
     }
-    false
+    Ok(false)
 }
 
 /// Transfer admin/governance to a new address.
-pub fn transfer_admin(env: &Env, caller: Address, new_admin: Address) {
+pub fn transfer_admin(env: &Env, caller: Address, new_admin: Address) -> Result<(), UpgradeError> {
     caller.require_auth();
 
-    let admin = get_admin(env);
+    let admin = get_admin(env)?;
     assert_eq!(caller, admin, "only admin can transfer admin role");
 
     env.storage().set(&ADMIN_KEY, &new_admin);
@@ -269,15 +283,16 @@ pub fn transfer_admin(env: &Env, caller: Address, new_admin: Address) {
         (symbol_short!("admin"), symbol_short!("transferred")),
         new_admin,
     );
+    Ok(())
 }
 
 /// Migration helper: read and return migration data from the previous
 /// contract version. Called by the new contract after upgrade.
-pub fn read_migration_data(env: &Env) -> Vec<u8> {
-    if let Some(proposal) = get_upgrade_proposal(env) {
-        return proposal.migration_data;
+pub fn read_migration_data(env: &Env) -> Result<Vec<u8>, UpgradeError> {
+    if let Some(proposal) = get_upgrade_proposal(env)? {
+        return Ok(proposal.migration_data);
     }
-    Vec::new(env)
+    Ok(Vec::new(env))
 }
 
 // Type alias for bytes — Soroban uses `Bytes` type.
