@@ -53,6 +53,8 @@ pub enum DataKey {
     Governance,
     /// Schema version of the data currently in storage (#2133)
     StorageVersion,
+    /// Role list for a given address (#2140)
+    Roles(Address),
 }
 
 /// Schema version this build reads and writes.
@@ -209,6 +211,11 @@ impl PayRaiderContract {
 
         // Verify caller is authenticated
         caller.require_auth();
+
+        // Verify contract is initialized (admin is set)
+        if !env.storage().instance().has(&DataKey::Admin) {
+            return Err(Error::AdminNotSet);
+        }
 
         // Check if caller has Admin or SnapshotSubmitter role
         let has_admin_role = Self::has_role(env.clone(), caller.clone(), Role::Admin);
@@ -423,6 +430,11 @@ impl PayRaiderContract {
         new_admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &new_admin);
 
+        // Revoke Admin role from the old admin
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Roles(old_admin.clone()));
+
         // Grant Admin role to the new admin
         let mut roles = Vec::new(&env);
         roles.push_back(Role::Admin);
@@ -567,7 +579,7 @@ impl PayRaiderContract {
         // Emit event
         env.events().publish(
             (symbol_short!("upgrade"),),
-            (caller, new_wasm_hash),
+            (admin, new_wasm_hash),
         );
 
         Ok(())
@@ -725,6 +737,23 @@ impl PayRaiderContract {
 
         env.storage().instance().set(&DataKey::Admin, &new_admin);
         bump_instance(&env);
+
+        // Revoke Admin role from the old admin
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Roles(old_admin.clone()));
+
+        // Grant Admin role to the new admin so role-based checks work
+        let mut roles = Vec::new(&env);
+        roles.push_back(Role::Admin);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Roles(new_admin.clone()), &roles);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Roles(new_admin.clone()),
+            LEDGERS_TO_EXTEND,
+            LEDGERS_TO_EXTEND,
+        );
 
         emit_admin_transferred(&env, old_admin, new_admin);
 
