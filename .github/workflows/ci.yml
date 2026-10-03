@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Format, clippy, test and build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32v1-none
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy -p payraider --all-targets -- -W clippy::all
+      - name: Test
+        run: cargo test
+      - name: Build the contract WASM
+        run: cargo build -p payraider --target wasm32v1-none --release
+      - name: Upload WASM
+        uses: actions/upload-artifact@v4
+        with:
+          name: payraider-wasm
+          path: target/wasm32v1-none/release/*.wasm
+          retention-days: 14
